@@ -453,7 +453,7 @@ Severity mapping:
 ---
 
 # Example Workflow
-
+(You can run each .py file individually like below, or you can just run Ask.py to calls the others)
 ## Step 1
 
 Collect research:
