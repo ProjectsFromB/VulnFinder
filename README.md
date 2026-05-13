@@ -242,7 +242,7 @@ ollama serve
 Inside `Ask.py`:
 
 ```python
-BASE_DIR = "C:/Users/GUEST1/.openclaw/workspace/docs"
+BASE_DIR = "C:\Users\GUEST1\Documents\VulnFinder\"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen2.5:7b"
 ```
@@ -257,7 +257,7 @@ As needed.
 
 ---
 
-# Usage
+# Usage (always input the full URL(s) ie. https://target.com)
 
 # 1. Build RAG Dataset
 
