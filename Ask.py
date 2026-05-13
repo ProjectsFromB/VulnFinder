@@ -11,7 +11,8 @@ PAYLOAD_INDEX = defaultdict(list)
 # =========================
 # CONFIG
 # =========================
-BASE_DIR = "C:/Users/GUEST1/.openclaw/workspace/docs"
+BASE_DIR = "C:/Users/GUEST1/Documents/VulnFinder/" 
+#Base_DIR = "C:/Users/GUEST1/.openclaw/workspace/docs"
 CHUNK_SIZE = 800
 MAX_RESULTS = 5
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -360,8 +361,15 @@ OUTPUT FORMAT:
     print("RESULT")
     print("=" * 60)
 
-    #clean = raw.strip()
-    #print(clean)
+    try:
+        data = response.json()
+        raw = data.get("response", "")
+        clean = raw.strip()
+        print(clean)
+
+    except Exception as e:
+        print("Failed to parse Ollama response:", e)
+
     print("=" * 60)
 
 def crawl_target(target):
@@ -461,7 +469,7 @@ def scan_list(file_path):
 # =========================
 # MAIN MENU
 # =========================
-mode = input("Mode (ask / scan / scanlist / fuzz / fuzzlist / hunt / crawl): ").strip().lower()
+mode = input("Mode (ask / scan / scanlist / fuzz / fuzzlist / crawl): ").strip().lower()
 if mode == "ask":
     QUERY = input("Ask something: ").strip()
     ask_ai(QUERY)
