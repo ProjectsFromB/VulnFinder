@@ -308,9 +308,12 @@ def build_context(query):
 # OLLAMA ASK
 # =========================
 def ask_ai(query):
-    context = build_context(query)
+    context = ""
 
-    if not context:
+    if "HTTP response" not in query:
+        context = build_context(query)
+    
+    if "HTTP response" not in query and not context:
         print("No relevant info found.")
         return
 
