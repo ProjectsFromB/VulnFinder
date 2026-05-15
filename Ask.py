@@ -384,7 +384,7 @@ def crawl_target(target):
 
     print("Running Katana...")
     subprocess.run(
-        f'katana -u {target} -d 2 -silent > katana.txt',
+        f'katana -u {target} -d 5 -jc -kf all -silent > katana.txt',
         shell=True
     )
 
