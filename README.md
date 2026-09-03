@@ -83,9 +83,9 @@ Detection signals:
 
 * Status code changes
 * Response length deltas
-* SQL errors
-* Reflected payloads
-* XSS indicators
+* Database errors tied to a unique probe marker
+* Reflected unique probe markers
+* Raw XSS probe reflection
 * File disclosure patterns
 * HTTP 500 errors
 
@@ -435,10 +435,10 @@ Signals used:
 | --------------------- | ----- |
 | Status change         | +20   |
 | Response length delta | +15   |
-| SQL error keyword     | +40   |
-| Reflected payload     | +25   |
+| SQL error near unique probe marker | +40   |
+| Unique probe marker reflected | +25   |
 | File disclosure       | +50   |
-| XSS reflection        | +45   |
+| Raw unique XSS probe reflected | +45   |
 | HTTP 500 error        | +20   |
 
 Severity mapping:
