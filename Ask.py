@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import secrets
 import requests
 import subprocess
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
@@ -75,6 +76,114 @@ def load_payloads():
 FUZZ_PAYLOADS = load_payloads()
 
 
+# A marker is embedded in every probe so a response can be tied to the exact
+# request that produced it.  This avoids treating normal page content as
+# evidence that an injected value changed the response.
+MARKER_PREFIX = "vulnfinderprobe"
+SQL_ERROR_RE = re.compile(
+    r"(?:"
+    r"\b(?:sql|mysql|mysqli|sqlite|postgres(?:ql)?|odbc|pdo)\b.{0,80}"
+    r"\b(?:error|exception|warning|syntax)\b"
+    r"|"
+    r"\b(?:error|exception|warning|syntax)\b.{0,80}"
+    r"\b(?:sql|mysql|mysqli|sqlite|postgres(?:ql)?|odbc|pdo)\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def make_probe_payload(payload, marker):
+    """Embed *marker* in a payload while preserving an XSS probe's shape."""
+    if "<script" in payload.lower():
+        # Turn alert(1) into alert('unique-marker') so a raw reflection is
+        # both uniquely attributable to this request and executable JavaScript.
+        probe, substitutions = re.subn(
+            r"(alert\s*\(\s*)[^)]*(\s*\))",
+            rf"\1'{marker}'\2",
+            payload,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if substitutions:
+            return probe
+        return re.sub(
+            r"</script\s*>",
+            f"/*{marker}*/</script>",
+            payload,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    return f"{payload}{marker}"
+
+
+def has_sql_error_for_marker(body, marker):
+    """Return true only when a database error is locally tied to this probe."""
+    body_lower = body.lower()
+    marker_lower = marker.lower()
+
+    for match in SQL_ERROR_RE.finditer(body):
+        start = max(0, match.start() - 250)
+        end = min(len(body), match.end() + 250)
+        if marker_lower in body_lower[start:end]:
+            return True
+
+    return False
+
+
+def score_fuzz_response(baseline, result, probe_payload, marker):
+    """Score only signals that are attributable to the current probe."""
+    score = 0
+    reasons = []
+    body = result["body"]
+    body_lower = body.lower()
+    marker_reflected = marker.lower() in body_lower
+
+    # Status change
+    if result["status"] != baseline["status"]:
+        score += 20
+        reasons.append("Status changed")
+
+    # Length delta
+    delta = abs(result["len"] - baseline["len"])
+    if delta > 100:
+        score += 15
+        reasons.append(f"Length delta ({delta})")
+
+    # SQL errors must be near this request's unique marker.  A generic word
+    # such as "warning" elsewhere in the page is not an SQL signal.
+    if has_sql_error_for_marker(body, marker):
+        score += 40
+        reasons.append("SQL error associated with probe marker")
+
+    # A marker is only present if the value generated for this exact request
+    # was reflected.  Punctuation-only payloads (for example ' or %27) cannot
+    # produce a reflection finding merely because those characters are normal
+    # HTML syntax.
+    if marker_reflected:
+        score += 25
+        reasons.append("Unique probe marker reflected")
+
+    # LFI / file disclosure
+    if "root:x:" in body_lower or "[extensions]" in body_lower:
+        score += 50
+        reasons.append("Possible file disclosure")
+
+    # A normal page's script tags are irrelevant.  Count XSS only if the raw,
+    # marker-bearing XSS probe itself is reflected, which is an executable
+    # script context rather than an unrelated page script.
+    if "<script" in probe_payload.lower() and probe_payload.lower() in body_lower:
+        score += 45
+        reasons.append("Raw XSS probe reflected in script context")
+
+    # Server error
+    if result["status"] == 500:
+        score += 20
+        reasons.append("500 server error")
+
+    return score, reasons
+
+
 
 def load_urls(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
@@ -135,54 +244,15 @@ def fuzz_url(url):
 
     for param in params:
         for payload in FUZZ_PAYLOADS:
+            marker = f"{MARKER_PREFIX}{secrets.token_hex(8)}"
+            probe_payload = make_probe_payload(payload, marker)
 
-            test_url = replace_param(url, param, payload)
+            test_url = replace_param(url, param, probe_payload)
             result = get_response(test_url)
 
-            score = 0
-            reasons = []
-            body = result["body"].lower()
-
-            # Status change
-            if result["status"] != baseline["status"]:
-                score += 20
-                reasons.append("Status changed")
-
-            # Length delta
-            delta = abs(result["len"] - baseline["len"])
-            if delta > 100:
-                score += 15
-                reasons.append(f"Length delta ({delta})")
-
-            # SQL error detection
-            sql_words = [
-                "sql", "mysql", "sqlite", "postgres",
-                "syntax error", "warning", "odbc", "pdo"
-            ]
-
-            if any(w in body for w in sql_words):
-                score += 40
-                reasons.append("SQL error keyword")
-
-            # Reflection
-            if payload.lower() in body:
-                score += 25
-                reasons.append("Payload reflected")
-
-            # LFI / file disclosure
-            if "root:x:" in body or "[extensions]" in body:
-                score += 50
-                reasons.append("Possible file disclosure")
-
-            # XSS reflection
-            if "<script" in body:
-                score += 45
-                reasons.append("Possible XSS reflection")
-
-            # Server error
-            if result["status"] == 500:
-                score += 20
-                reasons.append("500 server error")
+            score, reasons = score_fuzz_response(
+                baseline, result, probe_payload, marker
+            )
 
             # Severity
             if score >= 90:
@@ -210,6 +280,7 @@ def fuzz_url(url):
                     "type": "sqli/xss/lfi/unknown",
                     "raw_signal": {
                         "payload": payload,
+                        "probe_payload": probe_payload,
                         "status": result["status"],
                         "length": result["len"],
                         "reasons": reasons
@@ -472,63 +543,67 @@ def scan_list(file_path):
 # =========================
 # MAIN MENU
 # =========================
-mode = input("Mode (ask / scan / scanlist / fuzz / fuzzlist / crawl): ").strip().lower()
-if mode == "ask":
-    QUERY = input("Ask something: ").strip()
-    ask_ai(QUERY)
+def main():
+    mode = input("Mode (ask / scan / scanlist / fuzz / fuzzlist / crawl): ").strip().lower()
+    if mode == "ask":
+        query = input("Ask something: ").strip()
+        ask_ai(query)
 
-elif mode == "scan":
-    TARGET = input("Enter URL: ").strip()
-    RESPONSE = fetch_url(TARGET)
+    elif mode == "scan":
+        target = input("Enter URL: ").strip()
+        response = fetch_url(target)
 
-    QUERY = f"Analyze this HTTP response for vulnerabilities:\n\n{RESPONSE}"
-    ask_ai(QUERY)
+        query = f"Analyze this HTTP response for vulnerabilities:\n\n{response}"
+        ask_ai(query)
 
-elif mode == "scanlist":
-    path = input("Enter file path: ").strip()
-    scan_list(path)
+    elif mode == "scanlist":
+        path = input("Enter file path: ").strip()
+        scan_list(path)
 
-elif mode == "fuzz":
-    TARGET = input("Enter URL with parameters: ").strip()
-    fuzz_url(TARGET)
+    elif mode == "fuzz":
+        target = input("Enter URL with parameters: ").strip()
+        fuzz_url(target)
 
-elif mode == "bulk-fuzz":
-    file_path = input("Enter path to URL list: ").strip()
+    elif mode == "bulk-fuzz":
+        file_path = input("Enter path to URL list: ").strip()
 
-    urls = load_urls(file_path)
+        urls = load_urls(file_path)
 
-    print(f"\nLoaded {len(urls)} URLs")
+        print(f"\nLoaded {len(urls)} URLs")
 
-    for url in urls:
-        print("\n" + "=" * 80)
-        print("Fuzzing:", url)
-        fuzz_url(url)
-
-elif mode == "crawl":
-    TARGET = input("Enter domain: ").strip()
-    crawl_target(TARGET)
-
-
-elif mode == "fuzzlist":
-    path = input("Enter file path: ").strip()
-
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            urls = [line.strip() for line in f if line.strip()]
-
-        original = len(urls)
-        urls = dedupe_param_urls(urls)
-
-        print(f"\nLoaded {original} URLs")
-        print(f"Deduplicated to {len(urls)} unique parameter patterns\n")
-
-        for i, url in enumerate(urls, 1):
-            print("=" * 70)
-            print(f"[{i}/{len(urls)}] Testing: {url}")
-            print("=" * 70)
+        for url in urls:
+            print("\n" + "=" * 80)
+            print("Fuzzing:", url)
             fuzz_url(url)
 
-    except Exception as e:
-        print("Error:", e)
-else:
-    print("Invalid mode.")
+    elif mode == "crawl":
+        target = input("Enter domain: ").strip()
+        crawl_target(target)
+
+    elif mode == "fuzzlist":
+        path = input("Enter file path: ").strip()
+
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                urls = [line.strip() for line in f if line.strip()]
+
+            original = len(urls)
+            urls = dedupe_param_urls(urls)
+
+            print(f"\nLoaded {original} URLs")
+            print(f"Deduplicated to {len(urls)} unique parameter patterns\n")
+
+            for i, url in enumerate(urls, 1):
+                print("=" * 70)
+                print(f"[{i}/{len(urls)}] Testing: {url}")
+                print("=" * 70)
+                fuzz_url(url)
+
+        except Exception as e:
+            print("Error:", e)
+    else:
+        print("Invalid mode.")
+
+
+if __name__ == "__main__":
+    main()
